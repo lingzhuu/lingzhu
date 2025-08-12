@@ -117,8 +117,6 @@ def compute_regional_mkscore(
 
     # Ratio of expression ranks
     ranks_tg = ranks[cell_select_pos, :]
-    gene_ranks_region = gmean(ranks_tg, axis=0)
-    gene_ranks_region[gene_ranks_region <= 1] = 0
 
     if not config.no_expression_fraction:
         # Ratio of expression fractions
@@ -130,9 +128,7 @@ def compute_regional_mkscore(
         # Simultaneously consider the ratio of expression fractions and ranks
         gene_ranks_region = gene_ranks_region * frac_region
 
-    mkscore = np.exp(gene_ranks_region) - 1 if not pearson_residuals else gene_ranks_region
-
-    return mkscore.astype(np.float16, copy=False)
+    return ranks_tg
 
 
 def run_latent_to_gene(config: LatentToGeneConfig):
@@ -279,43 +275,6 @@ def run_latent_to_gene(config: LatentToGeneConfig):
     # Normalize the ranks
     ranks /= gM
 
-    def compute_mk_score_wrapper(cell_pos):
-        return compute_regional_mkscore(
-            cell_pos,
-            spatial_net_dict,
-            coor_latent,
-            config,
-            cell_annotations,
-            ranks,
-            frac_whole,
-            adata_X_bool,
-            pearson_residuals,
-        )
-
-    logger.info("------Computing marker scores...")
-    mk_score = np.zeros((n_cells, n_genes), dtype=np.float16)
-    for cell_pos in trange(n_cells, desc="Calculating marker scores"):
-        mk_score[cell_pos, :] = compute_mk_score_wrapper(cell_pos)
-
-    mk_score = mk_score.T
-    logger.info("Marker scores computed.")
-
-    # Remove mitochondrial genes
-    gene_names = adata.var_names.values.astype(str)
-    mt_gene_mask = ~(np.char.startswith(gene_names, "MT-") | np.char.startswith(gene_names, "mt-"))
-    mk_score = mk_score[mt_gene_mask, :]
-    gene_names = gene_names[mt_gene_mask]
-    logger.info(f"Removed mitochondrial genes. Remaining genes: {len(gene_names)}.")
-
-    # Save the marker scores
-    logger.info("------Saving marker scores ...")
-    output_file_path = Path(config.mkscore_feather_path)
-    output_file_path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-    mk_score_df = pd.DataFrame(mk_score, index=gene_names, columns=adata.obs_names)
-    mk_score_df.reset_index(inplace=True)
-    mk_score_df.rename(columns={"index": "HUMAN_GENE_SYM"}, inplace=True)
-    mk_score_df.to_feather(output_file_path)
-    logger.info(f"Marker scores saved to {output_file_path}.")
 
     # Save the modified adata object to disk
     adata.write(config.hdf5_with_latent_path)

@@ -39,6 +39,7 @@ def preprocess_data(adata, params):
     """
     logger.info("Preprocessing data...")
 
+
     if params.data_layer in adata.layers.keys():
         logger.info(f"Using data layer: {params.data_layer}...")
         adata.X = adata.layers[params.data_layer].copy()
@@ -51,6 +52,12 @@ def preprocess_data(adata, params):
 
     if params.data_layer in ["count", "counts", "X"]:
 
+        # Remove mitochondrial genes
+        gene_names = adata.var_names.values.astype(str)
+        mt_gene_mask = ~(np.char.startswith(gene_names, "MT-") | np.char.startswith(gene_names, "mt-"))
+        adata = adata[:, mt_gene_mask].copy()
+        logger.info(f"Removed mitochondrial genes. Remaining genes: {len(gene_names)}.")
+
         # Normalize the data
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
@@ -62,7 +69,6 @@ def preprocess_data(adata, params):
                 adata, inplace=False, clip=10
             )
             adata.layers["pearson_residuals"] = pearson_residuals["X"]
-
 
     return adata
 
