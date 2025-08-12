@@ -95,7 +95,7 @@ def find_neighbors_regional(cell_pos, spatial_net_dict, coor_latent, config, cel
     return cell_select_pos
 
 
-def compute_regional_mkscore(
+def compute_regional_rank_list(
     cell_pos,
     spatial_net_dict,
     coor_latent,
@@ -257,9 +257,6 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             data = adata_X[i, :].toarray().flatten()
             ranks[i, :] = rankdata(data, method="average")
 
-    if gM is None:
-        gM = gmean(ranks, axis=0)
-        gM = gM.astype(np.float16)
 
     adata_X_bool = adata_X.astype(bool)
     if frac_whole is None:
@@ -271,10 +268,23 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             "Gene expression proportion of each gene across cells in all sections has been provided."
         )
 
-    frac_whole += 1e-12  # Avoid division by zero
-    # Normalize the ranks
-    ranks /= gM
+    def compute_rank_wrapper(cell_pos):
+        return compute_regional_rank_list(
+            cell_pos,
+            spatial_net_dict,
+            coor_latent,
+            config,
+            cell_annotations,
+            ranks,
+            frac_whole,
+            adata_X_bool,
+            pearson_residuals,
+        )
+    gene_ranks_region_list = []
+    for i in trange(n_cells, desc="Computing regional ranks for each cell"):  
+        gene_ranks_region_list.append(compute_rank_wrapper(i))
 
+    logger.info("Ranking completed.")
 
     # Save the modified adata object to disk
     adata.write(config.hdf5_with_latent_path)
