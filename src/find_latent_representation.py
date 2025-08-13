@@ -33,6 +33,66 @@ def set_seed(seed_value):
         logger.info("Using CPU for computations.")
 
 
+def quality_control(adata, params):
+    # adata,
+    # mode="percentile",          # "percentile" or "absolute"
+    # groupby=None,               # per-sample thresholds (e.g., "sample" or "batch")
+    # # percentile mode (0–100)
+    # low_umi_pct=1,
+    # high_umi_pct=99,
+    # mt_cap_pct=20,
+    # # absolute mode
+    # min_umi=None,
+    # max_umi=None,
+    # mt_cap_abs=None,            # in %
+    # # extras
+    # drop_mt_genes=False,
+    """
+    Filter Visium/space spots by UMI, genes, and mt% using either percentiles or absolute thresholds.
+    """
+    logger.info("Performing quality control...")
+
+    obs = adata.obs
+
+    adata.var['mt'] = adata.var_names.str.startswith(('MT-','mt-'))
+    sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)
+
+    def pct_series(name, p):
+        if p is None:
+            return None
+        if params.groupby is None:
+            v = np.percentile(obs[name].to_numpy(), p)
+            return pd.Series(v, index=obs.index)
+        return obs.groupby(params.groupby)[name].transform(lambda x: np.percentile(x.to_numpy(), p))
+
+    if params.mode == "percentile":
+        low_umi_s   = pct_series("total_counts",   params.low_umi_pct)
+        high_umi_s  = pct_series("total_counts",   params.high_umi_pct)
+        mt_cap_s    = pct_series("pct_counts_mt",  params.mt_cap_pct)
+    elif params.mode == "absolute":
+        def abs_series(val): return None if val is None else pd.Series(val, index=obs.index)
+        low_umi_s   = abs_series(params.min_umi)
+        high_umi_s  = abs_series(params.max_umi)
+        mt_cap_s    = abs_series(params.mt_cap_abs)
+    else:
+        raise ValueError("mode must be 'percentile' or 'absolute'")
+
+    keep = pd.Series(True, index=obs.index)
+    if low_umi_s   is not None: keep &= obs["total_counts"]  >= low_umi_s
+    if high_umi_s  is not None: keep &= obs["total_counts"]  <= high_umi_s
+    if mt_cap_s    is not None: keep &= obs["pct_counts_mt"] <= mt_cap_s
+
+    adata_qc = adata[keep.values].copy()
+    if params.drop_mt_genes:
+        # Remove mitochondrial genes
+        gene_names = adata_qc.var_names.values.astype(str)
+        mt_gene_mask = ~(np.char.startswith(gene_names, "MT-") | np.char.startswith(gene_names, "mt-"))
+        adata_qc = adata_qc[:, mt_gene_mask].copy()
+        logger.info(f"Removed mitochondrial genes. Remaining genes: {len(gene_names)}.")
+
+    return adata_qc   
+
+
 def preprocess_data(adata, params):
     """
     Preprocess the Data
@@ -51,13 +111,6 @@ def preprocess_data(adata, params):
         raise ValueError(f"Invalid data layer: {params.data_layer}, please check the input data.")
 
     if params.data_layer in ["count", "counts", "X"]:
-
-        # Remove mitochondrial genes
-        gene_names = adata.var_names.values.astype(str)
-        mt_gene_mask = ~(np.char.startswith(gene_names, "MT-") | np.char.startswith(gene_names, "mt-"))
-        adata = adata[:, mt_gene_mask].copy()
-        logger.info(f"Removed mitochondrial genes. Remaining genes: {len(gene_names)}.")
-
 
         # Get the pearson residuals
         if params.pearson_residuals:
@@ -130,10 +183,12 @@ def run_find_latent_representation(args: FindLatentRepresentationsConfig):
         adata.layers["count"] = adata.X.copy()
 
     adata.var_names_make_unique()
-    # Filter genes with low expression
-    sc.pp.filter_genes(adata, min_cells=args.min_cells)
 
     logger.info(f"The ST data contains {adata.shape[0]} cells, {adata.shape[1]} genes.")
+    
+    # Perform quality control
+    if args.quality_control:
+        adata = quality_control(adata)
 
     # Load the cell type annotation
     if args.annotation is not None:
