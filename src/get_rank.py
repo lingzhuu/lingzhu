@@ -102,9 +102,6 @@ def compute_regional_rank_list(
     config,
     cell_annotations,
     ranks,
-    frac_whole,
-    adata_X_bool,
-    pearson_residuals,
 ):
     """
     Compute gmean ranks of a region.
@@ -117,16 +114,6 @@ def compute_regional_rank_list(
 
     # Ratio of expression ranks
     ranks_tg = ranks[cell_select_pos, :]
-
-    if not config.no_expression_fraction:
-        # Ratio of expression fractions
-        frac_focal = adata_X_bool[cell_select_pos, :].sum(axis=0).A1 / len(cell_select_pos)
-        frac_region = frac_focal / frac_whole
-        frac_region[frac_region <= 1] = 0
-        frac_region[frac_region > 1] = 1
-
-        # Simultaneously consider the ratio of expression fractions and ranks
-        gene_ranks_region = gene_ranks_region * frac_region
 
     return ranks_tg
 
@@ -207,32 +194,7 @@ def run_latent_to_gene(config: LatentToGeneConfig):
     coor_latent = coor_latent.astype(np.float32)
     logger.info("Latent representation extracted.")
 
-    # Geometric mean across slices
-    gM = None
-    frac_whole = None
-    if config.gM_slices is not None:
-        logger.info("Geometrical mean across multiple slices is provided.")
-        gM_df = pd.read_parquet(config.gM_slices)
-        if config.species is not None:
-            homologs = pd.read_csv(config.homolog_file, sep="\t")
-            if homologs.shape[1] < 2:
-                raise ValueError(
-                    "Homologs file must have at least two columns: one for the species and one for the human gene symbol."
-                )
-            homologs.columns = [config.species, "HUMAN_GENE_SYM"]
-            homologs.set_index(config.species, inplace=True)
-            gM_df = gM_df.loc[gM_df.index.isin(homologs.index)]
-            gM_df.index = homologs.loc[gM_df.index, "HUMAN_GENE_SYM"].values
-        common_genes = np.intersect1d(adata.var_names, gM_df.index)
-        gM_df = gM_df.loc[common_genes]
-        gM = gM_df["G_Mean"].values
-        frac_whole = gM_df["frac"].values
-        adata = adata[:, common_genes]
-        logger.info(
-            f"{len(common_genes)} common genes retained after loading the cross slice geometric mean."
-        )
-
-    # Compute ranks after taking common genes with gM_slices
+    # Compute ranks
     logger.info("------Ranking the spatial data...")
     if not scipy.sparse.issparse(adata.X):
         adata_X = scipy.sparse.csr_matrix(adata.X)
@@ -257,17 +219,6 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             data = adata_X[i, :].toarray().flatten()
             ranks[i, :] = rankdata(data, method="average")
 
-
-    adata_X_bool = adata_X.astype(bool)
-    if frac_whole is None:
-        # Compute the fraction of each gene across cells
-        frac_whole = np.asarray(adata_X_bool.sum(axis=0)).flatten() / n_cells
-        logger.info("Gene expression proportion of each gene across cells computed.")
-    else:
-        logger.info(
-            "Gene expression proportion of each gene across cells in all sections has been provided."
-        )
-
     def compute_rank_wrapper(cell_pos):
         return compute_regional_rank_list(
             cell_pos,
@@ -276,9 +227,6 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             config,
             cell_annotations,
             ranks,
-            frac_whole,
-            adata_X_bool,
-            pearson_residuals,
         )
     gene_ranks_region_list = []
     for i in trange(n_cells, desc="Computing regional ranks for each cell"):  

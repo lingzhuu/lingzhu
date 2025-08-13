@@ -58,10 +58,7 @@ def preprocess_data(adata, params):
         adata = adata[:, mt_gene_mask].copy()
         logger.info(f"Removed mitochondrial genes. Remaining genes: {len(gene_names)}.")
 
-        # Normalize the data
-        sc.pp.normalize_total(adata, target_sum=1e4)
-        sc.pp.log1p(adata)
-        
+
         # Get the pearson residuals
         if params.pearson_residuals:
             sc.experimental.pp.normalize_pearson_residuals(adata, inplace=False)
@@ -69,6 +66,10 @@ def preprocess_data(adata, params):
                 adata, inplace=False, clip=10
             )
             adata.layers["pearson_residuals"] = pearson_residuals["X"]
+
+        # Normalize the data
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
 
     return adata
 

@@ -1,6 +1,10 @@
+import logging
+
 import scanpy as sc
 import pandas as pd
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 def res_search_fixed_clus_leiden(adata, n_clusters, increment=0.01, random_seed=2023):
 
@@ -70,3 +74,30 @@ def mclust_R(adata, n_clusters, use_rep='SEDR', key_added='SEDR', random_seed=20
     adata.obs[key_added] = adata.obs[key_added].astype('category')
 
     return adata
+
+
+class ClusteringFunction:
+    def __init__(self, adata, args: FindLatentRepresentationsConfig):
+        self.params = args
+        self.adata = adata
+
+    def clustering(args: FindLatentRepresentationsConfig):
+        set_seed(2024)
+
+        # Select highly variable genes
+        if args.cluster_method in ["mclust", "leiden", "louvain"]:
+            sc.pp.highly_variable_genes(adata, flavor="seurat_v3", n_top_genes=args.feat_cell)
+
+        latent_rep = LatentRepresentationFinder(adata, args)
+        latent_gvae = latent_rep.run_gnn_vae(label)
+        latent_pca = latent_rep.latent_pca
+
+        # Add latent representations to the AnnData object
+        logger.info("Adding latent representations...")
+        adata.obsm["latent_GVAE"] = latent_gvae
+        adata.obsm["latent_PCA"] = latent_pca
+
+
+        # Save the AnnData object
+        logger.info("Saving ST data...")
+        adata.write(args.hdf5_with_latent_path)
