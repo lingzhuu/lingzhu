@@ -10,7 +10,8 @@ output: h5ad w/ latent infomation
 ### Auto clustering (optional)
 **clustering_func.py**
 
-- leidan  
+- leidan
+- louvain  
 - mcluster (R embedding)  
 - plot*  
 
