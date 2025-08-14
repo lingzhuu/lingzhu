@@ -34,7 +34,6 @@ def set_seed(seed_value):
 
 
 def quality_control(adata, params):
-    # adata,
     # mode="percentile",          # "percentile" or "absolute"
     # groupby=None,               # per-sample thresholds (e.g., "sample" or "batch")
     # # percentile mode (0–100)
@@ -46,16 +45,17 @@ def quality_control(adata, params):
     # max_umi=None,
     # mt_cap_abs=None,            # in %
     # # extras
-    # drop_mt_genes=False,
+    # drop_mt_genes=True,
     """
     Filter Visium/space spots by UMI, genes, and mt% using either percentiles or absolute thresholds.
     """
     logger.info("Performing quality control...")
 
     obs = adata.obs
+    mt_cap_pct = params.mt_cap_pct
 
     adata.var['mt'] = adata.var_names.str.startswith(('MT-','mt-'))
-    sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)
+    sc.pp.calculate_qc_metrics(adata, layer="count", qc_vars=['mt'], inplace=True)
 
     def pct_series(name, p):
         if p is None:
@@ -68,21 +68,22 @@ def quality_control(adata, params):
     if params.mode == "percentile":
         low_umi_s   = pct_series("total_counts",   params.low_umi_pct)
         high_umi_s  = pct_series("total_counts",   params.high_umi_pct)
-        mt_cap_s    = pct_series("pct_counts_mt",  params.mt_cap_pct)
+
     elif params.mode == "absolute":
         def abs_series(val): return None if val is None else pd.Series(val, index=obs.index)
         low_umi_s   = abs_series(params.min_umi)
         high_umi_s  = abs_series(params.max_umi)
-        mt_cap_s    = abs_series(params.mt_cap_abs)
+
     else:
         raise ValueError("mode must be 'percentile' or 'absolute'")
 
     keep = pd.Series(True, index=obs.index)
-    if low_umi_s   is not None: keep &= obs["total_counts"]  >= low_umi_s
-    if high_umi_s  is not None: keep &= obs["total_counts"]  <= high_umi_s
-    if mt_cap_s    is not None: keep &= obs["pct_counts_mt"] <= mt_cap_s
-
+    if low_umi_s  is not None: keep &= obs["total_counts"]  >= low_umi_s
+    if high_umi_s is not None: keep &= obs["total_counts"]  <= high_umi_s
+    if mt_cap_pct is not None: keep &= obs["pct_counts_mt"] <= mt_cap_pct
     adata_qc = adata[keep.values].copy()
+    logger.info(f"Filtered {adata.shape[0] - adata_qc.shape[0]} cells based on quality control.")
+    
     if params.drop_mt_genes:
         # Remove mitochondrial genes
         gene_names = adata_qc.var_names.values.astype(str)
