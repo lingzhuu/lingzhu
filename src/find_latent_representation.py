@@ -4,6 +4,7 @@ import random
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import scipy.sparse as sp
 
 import scanpy as sc
 import torch
@@ -100,17 +101,6 @@ def preprocess_data(adata, params):
     """
     logger.info("Preprocessing data...")
 
-
-    if params.data_layer in adata.layers.keys():
-        logger.info(f"Using data layer: {params.data_layer}...")
-        adata.X = adata.layers[params.data_layer].copy()
-    elif params.data_layer == "X":
-        logger.info(f"Using data layer: {params.data_layer}...")
-        if adata.X.dtype == "float32" or adata.X.dtype == "float64":
-            logger.warning("The data layer should be raw count data")
-    else:
-        raise ValueError(f"Invalid data layer: {params.data_layer}, please check the input data.")
-
     if params.data_layer in ["count", "counts", "X"]:
 
         # Get the pearson residuals
@@ -122,7 +112,7 @@ def preprocess_data(adata, params):
             adata.layers["pearson_residuals"] = pearson_residuals["X"]
 
         # Normalize the data
-        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.normalize_total(adata, target_sum=1e6)
         sc.pp.log1p(adata)
 
     return adata
@@ -180,16 +170,46 @@ def run_find_latent_representation(args: FindLatentRepresentationsConfig):
     else:
         adata = sc.read_h5ad(args.input_path)
 
-    if "count" not in adata.layers:
-        adata.layers["count"] = adata.X.copy()
+    # Normalize 'counts' layer name
+    if "counts" in adata.layers and "count" not in adata.layers:
+        adata.layers["count"] = adata.layers["counts"]
 
+
+
+    def _is_integer_like(x, sample=200000):
+        """Check if matrix is approximately integer and non-negative (sampled to avoid full scan)."""
+        v = x.data if sp.issparse(x) else np.asarray(x).ravel()
+        if v.size == 0:
+            return False
+        if v.size > sample:
+            idx = np.random.choice(v.size, sample, replace=False)
+            v = v[idx]
+        if v.min() < 0:
+            return False
+        return np.allclose(v, np.round(v))
+
+    if "count" not in adata.layers:
+        if _is_integer_like(adata.X):
+            logger.warning("No 'count' layer found; detected that adata.X is approximately integer and non-negative, backing it up to layers['count'].")
+            adata.layers["count"] = adata.X.copy()
+        else:
+            raise ValueError("The data layer should be raw count data.")
+    else:
+        if not _is_integer_like(adata.layers["count"]):
+            raise ValueError("The data layer should be raw count data.")
+
+    # Make variable names unique
     adata.var_names_make_unique()
 
     logger.info(f"The ST data contains {adata.shape[0]} cells, {adata.shape[1]} genes.")
+
     
     # Perform quality control
     if args.quality_control:
         adata = quality_control(adata)
+
+    # Preprocess data
+    adata = preprocess_data(adata, args)
 
     # Load the cell type annotation
     if args.annotation is not None:
@@ -204,8 +224,6 @@ def run_find_latent_representation(args: FindLatentRepresentationsConfig):
     else:
         label = None
 
-    # Preprocess data
-    adata = preprocess_data(adata, args)
 
     latent_rep = LatentRepresentationFinder(adata, args)
     latent_gvae = latent_rep.run_gnn_vae(label)
