@@ -101,19 +101,21 @@ def preprocess_data(adata, params):
     """
     logger.info("Preprocessing data...")
 
-    if params.data_layer in ["count", "counts", "X"]:
+    # HVGs based on count
+    sc.pp.highly_variable_genes(adata, flavor="seurat_v3", n_top_genes=params.feat_cell)
 
-        # Get the pearson residuals
-        if params.pearson_residuals:
-            sc.experimental.pp.normalize_pearson_residuals(adata, inplace=False)
-            pearson_residuals = sc.experimental.pp.normalize_pearson_residuals(
-                adata, inplace=False, clip=10
-            )
-            adata.layers["pearson_residuals"] = pearson_residuals["X"]
-
-        # Normalize the data
-        sc.pp.normalize_total(adata, target_sum=1e6)
-        sc.pp.log1p(adata)
+    # Get the pearson residuals
+    if params.pearson_residuals:
+        sc.experimental.pp.normalize_pearson_residuals(adata, inplace=False)
+        pearson_residuals = sc.experimental.pp.normalize_pearson_residuals(
+            adata, inplace=False, clip=10
+        )
+        adata.layers["pearson_residuals"] = pearson_residuals["X"]
+    
+    # Normalize the data
+    sc.pp.normalize_total(adata, target_sum=1e6)
+    sc.pp.log1p(adata)
+        
 
     return adata
 
@@ -134,7 +136,7 @@ class LatentRepresentationFinder:
         self.graph_dict = construct_adjacency_matrix(adata, self.params)
 
     def compute_pca(self):
-        self.latent_pca = PCA(n_components=self.params.n_comps).fit_transform(
+        self.latent_pca = PCA(n_components=self.params.n_comps, random_state=42).fit_transform(
             self.expression_array
         )
         return self.latent_pca
@@ -161,7 +163,7 @@ class LatentRepresentationFinder:
 
 
 def run_find_latent_representation(args: FindLatentRepresentationsConfig):
-    set_seed(2024)
+    set_seed(args.random_seed)
 
     # Load the ST data
     logger.info(f"Loading ST data of {args.sample_name}...")
@@ -173,8 +175,6 @@ def run_find_latent_representation(args: FindLatentRepresentationsConfig):
     # Normalize 'counts' layer name
     if "counts" in adata.layers and "count" not in adata.layers:
         adata.layers["count"] = adata.layers["counts"]
-
-
 
     def _is_integer_like(x, sample=200000):
         """Check if matrix is approximately integer and non-negative (sampled to avoid full scan)."""
