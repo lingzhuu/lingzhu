@@ -6,7 +6,18 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-def res_search_fixed_clus_leiden(adata, n_clusters, increment=0.01, random_seed=2023):
+def _check_use_rep(adata, use_rep):
+    if use_rep is None:
+        use_rep = 'SEDR'
+        logger.info("Use SEDR results for clustering.")
+
+    if use_rep not in adata.obsm and use_rep not in adata.layers:
+        raise KeyError(f"use_rep='{use_rep}' not found in adata.obsm or adata.layers.")
+
+    return use_rep
+
+
+def res_search_fixed_clus_leiden(adata, n_clusters, random_seed, increment=0.01):
 
     for res in np.arange(0.2, 2, increment):
         sc.tl.leiden(adata, random_state=random_seed, resolution=res)
@@ -15,40 +26,36 @@ def res_search_fixed_clus_leiden(adata, n_clusters, increment=0.01, random_seed=
     return res-increment
 
 
-def leiden(adata, n_clusters, key_added='SEDR', random_seed=2023):
-    sc.pp.neighbor(adata, use_rep=use_rep)
-    res = res_search_fixed_clus_leiden(adata, n_clusters, increment=0.01, random_seed=random_seed)
-    sc.tl.leiden(adata, random_state=random_seed, resolution=res)
+def leiden(adata, n_clusters, random_seed, use_rep, increment=0.01):
 
-    adata.obs[key_added] = adata.obs['leiden']
-    adata.obs[key_added] = adata.obs[key_added].astype('int')
-    adata.obs[key_added] = adata.obs[key_added].astype('category')
+    logger.info("Starting Leiden clustering to get {n_clusters} clusters using '{use_rep}' representation...")
+    sc.pp.neighbors(adata, use_rep=use_rep)
+    res = res_search_fixed_clus_leiden(adata, n_clusters, increment, random_seed=random_seed)
+    sc.tl.leiden(adata, random_state=random_seed, resolution=res)
 
     return adata
 
 
-def res_search_fixed_clus_louvain(adata, n_clusters, increment=0.01, random_seed=2023):
+def res_search_fixed_clus_louvain(adata, n_clusters, random_seed, increment=0.01):
     for res in np.arange(0.2, 2, increment):
         sc.tl.louvain(adata, random_state=random_seed, resolution=res)
         if len(adata.obs['louvain'].unique()) > n_clusters:
             break
     return res-increment
 
-def louvain(adata, n_clusters, key_added='SEDR', random_seed=2023):
-    sc.pp.neighbor(adata, use_rep=use_rep)
-    res = res_search_fixed_clus_louvain(adata, n_clusters, increment=0.01, random_seed=random_seed)
+def louvain(adata, n_clusters, random_seed, use_rep, increment=0.01):
+
+    logger.info(f"Starting Louvain clustering to get {n_clusters} clusters using '{use_rep}' representation...")
+    sc.pp.neighbors(adata, use_rep=use_rep)
+    res = res_search_fixed_clus_louvain(adata, n_clusters, increment, random_seed=random_seed)
     sc.tl.louvain(adata, random_state=random_seed, resolution=res)
 
-    adata.obs[key_added] = adata.obs['louvain']
-    adata.obs[key_added] = adata.obs[key_added].astype('int')
-    adata.obs[key_added] = adata.obs[key_added].astype('category')
 
     return adata
 
 
-
-def mclust_R(adata, n_clusters, use_rep='SEDR', key_added='SEDR', random_seed=2023):
-    """\
+def mclust_R(adata, n_clusters, random_seed, use_rep):
+    """
     Clustering using the mclust algorithm.
     The parameters are the same as those in the R package mclust.
     """
@@ -69,35 +76,47 @@ def mclust_R(adata, n_clusters, use_rep='SEDR', key_added='SEDR', random_seed=20
     res = rmclust(rpy2.robjects.numpy2ri.numpy2rpy(adata.obsm[use_rep]), n_clusters, modelNames)
     mclust_res = np.array(res[-2])
 
-    adata.obs[key_added] = mclust_res
-    adata.obs[key_added] = adata.obs[key_added].astype('int')
-    adata.obs[key_added] = adata.obs[key_added].astype('category')
+    adata.obs['mclust'] = pd.Categorical(mclust_res)
 
     return adata
 
 
-class ClusteringFunction:
-    def __init__(self, adata, args: FindLatentRepresentationsConfig):
-        self.params = args
+class ClusteringRunner:
+    VALID_METHODS = ['mclust', 'leiden', 'louvain']
+
+    def __init__(self, adata, use_rep=None, random_seed=42):
         self.adata = adata
+        use_rep = _check_use_rep(adata, use_rep)
+        self.use_rep = use_rep
+        self.random_seed = random_seed
 
-    def clustering(args: FindLatentRepresentationsConfig):
-        set_seed(2024)
+    def run(self, method, n_clusters, key_added=None, increment=0.01, plot=False):
+        if method not in self.VALID_METHODS:
+            raise ValueError(f"Clustering method should be one of {self.VALID_METHODS}, but got '{method}'.")
 
-        # Select highly variable genes
-        if args.cluster_method in ["mclust", "leiden", "louvain"]:
-            sc.pp.highly_variable_genes(adata, flavor="seurat_v3", n_top_genes=args.feat_cell)
+        if method == 'leiden':
+            self.adata = leiden(self.adata, n_clusters, use_rep=self.use_rep,
+                                random_seed=self.random_seed, increment=increment)
+            col = 'leiden'
+        elif method == 'louvain':
+            self.adata = louvain(self.adata, n_clusters, use_rep=self.use_rep,
+                                 random_seed=self.random_seed, increment=increment)
+            col = 'louvain'
+        else:  # mclust
+            self.adata = mclust_R(self.adata, n_clusters, use_rep=self.use_rep,
+                                  random_seed=self.random_seed)
+            col = 'mclust'
 
-        latent_rep = LatentRepresentationFinder(adata, args)
-        latent_gvae = latent_rep.run_gnn_vae(label)
-        latent_pca = latent_rep.latent_pca
-
-        # Add latent representations to the AnnData object
-        logger.info("Adding latent representations...")
-        adata.obsm["latent_GVAE"] = latent_gvae
-        adata.obsm["latent_PCA"] = latent_pca
+        target_col = key_added or f"{method}_{self.use_rep}"
+        self.adata.obs[target_col] = self.adata.obs[col].astype(int).astype('category')
 
 
-        # Save the AnnData object
-        logger.info("Saving ST data...")
-        adata.write(args.hdf5_with_latent_path)
+        if plot:
+            sc.pl.spatial(self.adata, color=target_col)
+
+        return target_col
+
+    def save(self, path):
+        logger.info(f"Saving AnnData to {path}")
+        self.adata.write(path)
+
