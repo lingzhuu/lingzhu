@@ -17,80 +17,85 @@ from gsMap.config import LatentToGeneConfig
 logger = logging.getLogger(__name__)
 
 
-def _find_neighbors(coor: np.ndarray, n_neighbors: int) -> pd.DataFrame:
-    """KNN based on spatial coordinates."""
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(coor)
+def find_neighbors(coor, num_neighbour):
+    """
+    Find Neighbors of each cell (based on spatial coordinates).
+    """
+    nbrs = NearestNeighbors(n_neighbors=num_neighbour).fit(coor)
     distances, indices = nbrs.kneighbors(coor, return_distance=True)
-    cell_idx = np.arange(coor.shape[0])
-    cell1 = np.repeat(cell_idx, indices.shape[1])
-    cell2 = indices.ravel()
-    distance = distances.ravel()
-    return pd.DataFrame({"Cell1": cell1, "Cell2": cell2, "Distance": distance})
+    cell_indices = np.arange(coor.shape[0])
+    cell1 = np.repeat(cell_indices, indices.shape[1])
+    cell2 = indices.flatten()
+    distance = distances.flatten()
+    spatial_net = pd.DataFrame({"Cell1": cell1, "Cell2": cell2, "Distance": distance})
+    return spatial_net
 
 
-def _build_spatial_net(adata, annotation: Optional[str], n_neighbors: int) -> dict[int, np.ndarray]:
-    """Build spatial neighbor dictionary; optionally grouped by annotation."""
+def build_spatial_net(adata, annotation, num_neighbour):
+    """
+    Build spatial neighbourhood matrix for each spot (cell) based on the spatial coordinates.
+    """
     logger.info("------Building spatial graph based on spatial coordinates...")
-    coor = adata.obsm["spatial"]
 
+    coor = adata.obsm["spatial"]
     if annotation is not None:
         logger.info("Cell annotations are provided...")
-        parts = []
+        spatial_net_list = []
+        # Cells with annotations
+        for ct in adata.obs[annotation].dropna().unique():
+            idx = np.where(adata.obs[annotation] == ct)[0]
+            coor_temp = coor[idx, :]
+            spatial_net_temp = find_neighbors(coor_temp, min(num_neighbour, coor_temp.shape[0]))
+            # Map back to original indices
+            spatial_net_temp["Cell1"] = idx[spatial_net_temp["Cell1"].values]
+            spatial_net_temp["Cell2"] = idx[spatial_net_temp["Cell2"].values]
+            spatial_net_list.append(spatial_net_temp)
+            logger.info(f"{ct}: {coor_temp.shape[0]} cells")
 
-        ann = adata.obs[annotation].values
-        for ct in pd.unique(ann[~pd.isnull(ann)]):
-            idx = np.where(ann == ct)[0]
-            coor_g = coor[idx, :]
-            k = min(n_neighbors, coor_g.shape[0])
-            df = _find_neighbors(coor_g, k)
-            df["Cell1"] = idx[df["Cell1"].to_numpy()]
-            df["Cell2"] = idx[df["Cell2"].to_numpy()]
-            parts.append(df)
-            logger.info(f"{ct}: {coor_g.shape[0]} cells")
-
-        if pd.isnull(ann).any():
-            idx_nan = np.where(pd.isnull(ann))[0]
-            logger.info(f"NaN: {len(idx_nan)} cells")
-            df_all = _find_neighbors(coor, n_neighbors)
-            parts.append(df_all[df_all["Cell1"].isin(idx_nan)])
-
-        df_all = pd.concat(parts, axis=0, ignore_index=True)
+        # Cells labeled as nan
+        if pd.isnull(adata.obs[annotation]).any():
+            idx_nan = np.where(pd.isnull(adata.obs[annotation]))[0]
+            logger.info(f"Nan: {len(idx_nan)} cells")
+            spatial_net_temp = find_neighbors(coor, num_neighbour)
+            spatial_net_temp = spatial_net_temp[spatial_net_temp["Cell1"].isin(idx_nan)]
+            spatial_net_list.append(spatial_net_temp)
+        spatial_net = pd.concat(spatial_net_list, axis=0)
     else:
         logger.info("Cell annotations are not provided...")
-        df_all = _find_neighbors(coor, n_neighbors)
+        spatial_net = find_neighbors(coor, num_neighbour)
 
-    return df_all.groupby("Cell1")["Cell2"].apply(lambda s: s.to_numpy()).to_dict()
+    return spatial_net.groupby("Cell1")["Cell2"].apply(np.array).to_dict()
 
 
-def _regional_topk(
-    cell_pos: int,
-    spatial_net: dict[int, np.ndarray],
-    latent: np.ndarray,
-    top_k: int,
-    cell_annotations: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """Select top_k neighbors by cosine similarity within spatial neighbors."""
-    nbrs = spatial_net.get(cell_pos, np.array([], dtype=int))
-    if nbrs.size == 0:
-        return nbrs
 
-    q = latent[cell_pos].reshape(1, -1)
-    K = latent[nbrs]
-    sim = cosine_similarity(q, K).ravel()
+def find_neighbors_regional(cell_pos, spatial_net_dict, coor_latent, config, cell_annotations):
+    num_neighbour = config.num_neighbour
+    annotations = config.annotation
 
-    if cell_annotations is not None:
-        same = (cell_annotations[nbrs] == cell_annotations[cell_pos])
-        if not np.any(same):
-            return np.array([], dtype=int)
-        nbrs = nbrs[same]
-        sim = sim[same]
+    cell_use_pos = spatial_net_dict.get(cell_pos, [])
+    if len(cell_use_pos) == 0:
+        return []
 
-    if sim.size == 0:
-        return np.array([], dtype=int)
+    cell_latent = coor_latent[cell_pos, :].reshape(1, -1)
+    neighbors_latent = coor_latent[cell_use_pos, :]
+    similarity = cosine_similarity(cell_latent, neighbors_latent).reshape(-1)
 
-    k = min(top_k, sim.size)
-    top_idx = np.argpartition(-sim, k - 1)[:k]
-    return nbrs[top_idx]
+    if annotations is not None:
+        cell_annotation = cell_annotations[cell_pos]
+        neighbor_annotations = cell_annotations[cell_use_pos]
+        mask = neighbor_annotations == cell_annotation
+        if not np.any(mask):
+            return []
+        similarity = similarity[mask]
+        cell_use_pos = cell_use_pos[mask]
+
+    if len(similarity) == 0:
+        return []
+
+    indices = np.argsort(-similarity)  # descending order
+    top_indices = indices[:num_neighbour]
+    cell_select_pos = cell_use_pos[top_indices]
+    return cell_select_pos
 
 
 def _maybe_homolog_transform(adata, config: LatentToGeneConfig) -> sc.AnnData:
