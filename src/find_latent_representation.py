@@ -11,6 +11,8 @@ import torch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import LabelEncoder
 
+import SEDR
+
 from gsMap.config import FindLatentRepresentationsConfig
 from gsMap.GNN.adjacency_matrix import construct_adjacency_matrix
 from gsMap.GNN.train import ModelTrainer
@@ -140,6 +142,27 @@ class LatentRepresentationFinder:
             self.expression_array
         )
         return self.latent_pca
+    
+    def run_sedr(self, verbose="whole ST data"):
+        # Use PCA if specified
+        if self.params.input_pca:
+            node_X = self.compute_pca()
+        else:
+            node_X = self.expression_array
+
+        # Update the input shape
+        self.params.n_nodes = node_X.shape[0]
+        self.params.feat_cell = node_X.shape[1]
+
+        # Run SEDR
+        logger.info(f"Finding latent representations for {verbose}...")
+        sedr_net = SEDR.Sedr(node_X, self.graph_dict, mode='clustering')
+        sedr_net.train_with_dec()
+
+        del self.graph_dict
+
+        sedr_feat, _, _, _ = sedr_net.process()
+        return sedr_feat
 
     def run_gnn_vae(self, label, verbose="whole ST data"):
         # Use PCA if specified
@@ -228,11 +251,13 @@ def run_find_latent_representation(args: FindLatentRepresentationsConfig):
     latent_rep = LatentRepresentationFinder(adata, args)
     latent_gvae = latent_rep.run_gnn_vae(label)
     latent_pca = latent_rep.latent_pca
+    latent_sedr = latent_rep.run_sedr()
 
     # Add latent representations to the AnnData object
     logger.info("Adding latent representations...")
     adata.obsm["latent_GVAE"] = latent_gvae
     adata.obsm["latent_PCA"] = latent_pca
+    adata.obsm["latent_SEDR"] = latent_sedr
 
 
     # Save the AnnData object
