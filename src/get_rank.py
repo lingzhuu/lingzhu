@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 from typing import Optional, Tuple, Literal
+import os
 
 import numpy as np
 import pandas as pd
@@ -133,7 +134,7 @@ def get_rank(
     *,
     store_layer: str = "regional_rank",
     agg: Literal["mean", "gmean"] = "mean",
-    save: bool = True,
+    save_adata: bool = True,
 ) -> Tuple[sc.AnnData, np.ndarray]:
     """
     Compute regional rank vector for each cell.
@@ -191,10 +192,13 @@ def get_rank(
         else:
             regional_rank[i, :] = ranks[sel, :].mean(axis=0, dtype=np.float32)
 
+    os.makedirs(config.output_file_path, exist_ok=True) # Ensure output directory exists
+    np.save(os.path.join(config.output_file_path, "regional_rank.npy"), regional_rank)
+
     adata.layers[store_layer] = regional_rank
     logger.info(f"Regional rank matrix stored in adata.layers['{store_layer}'] with shape {regional_rank.shape}.")
 
-    if save:
+    if save_adata:
         adata.write(str(path))
         logger.info(f"Modified AnnData saved to {path}")
 
