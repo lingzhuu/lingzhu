@@ -1,13 +1,14 @@
 import logging
 from pathlib import Path
+from typing import Optional, Tuple, Literal
 
 import numpy as np
 import pandas as pd
 import scanpy as sc
-import scipy
+import scipy.sparse as sp
 from scipy.stats import rankdata
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm, trange
 
 from gsMap.config import LatentToGeneConfig
@@ -15,225 +16,186 @@ from gsMap.config import LatentToGeneConfig
 logger = logging.getLogger(__name__)
 
 
-def find_neighbors(coor, num_neighbour):
-    """
-    Find Neighbors of each cell (based on spatial coordinates).
-    """
-    nbrs = NearestNeighbors(n_neighbors=num_neighbour).fit(coor)
+def _find_neighbors(coor: np.ndarray, n_neighbors: int) -> pd.DataFrame:
+    """KNN based on spatial coordinates."""
+    nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(coor)
     distances, indices = nbrs.kneighbors(coor, return_distance=True)
-    cell_indices = np.arange(coor.shape[0])
-    cell1 = np.repeat(cell_indices, indices.shape[1])
-    cell2 = indices.flatten()
-    distance = distances.flatten()
-    spatial_net = pd.DataFrame({"Cell1": cell1, "Cell2": cell2, "Distance": distance})
-    return spatial_net
+    cell_idx = np.arange(coor.shape[0])
+    cell1 = np.repeat(cell_idx, indices.shape[1])
+    cell2 = indices.ravel()
+    distance = distances.ravel()
+    return pd.DataFrame({"Cell1": cell1, "Cell2": cell2, "Distance": distance})
 
 
-def build_spatial_net(adata, annotation, num_neighbour):
-    """
-    Build spatial neighbourhood matrix for each spot (cell) based on the spatial coordinates.
-    """
+def _build_spatial_net(adata, annotation: Optional[str], n_neighbors: int) -> dict[int, np.ndarray]:
+    """Build spatial neighbor dictionary; optionally grouped by annotation."""
     logger.info("------Building spatial graph based on spatial coordinates...")
-
     coor = adata.obsm["spatial"]
+
     if annotation is not None:
         logger.info("Cell annotations are provided...")
-        spatial_net_list = []
-        # Cells with annotations
-        for ct in adata.obs[annotation].dropna().unique():
-            idx = np.where(adata.obs[annotation] == ct)[0]
-            coor_temp = coor[idx, :]
-            spatial_net_temp = find_neighbors(coor_temp, min(num_neighbour, coor_temp.shape[0]))
-            # Map back to original indices
-            spatial_net_temp["Cell1"] = idx[spatial_net_temp["Cell1"].values]
-            spatial_net_temp["Cell2"] = idx[spatial_net_temp["Cell2"].values]
-            spatial_net_list.append(spatial_net_temp)
-            logger.info(f"{ct}: {coor_temp.shape[0]} cells")
+        parts = []
 
-        # Cells labeled as nan
-        if pd.isnull(adata.obs[annotation]).any():
-            idx_nan = np.where(pd.isnull(adata.obs[annotation]))[0]
-            logger.info(f"Nan: {len(idx_nan)} cells")
-            spatial_net_temp = find_neighbors(coor, num_neighbour)
-            spatial_net_temp = spatial_net_temp[spatial_net_temp["Cell1"].isin(idx_nan)]
-            spatial_net_list.append(spatial_net_temp)
-        spatial_net = pd.concat(spatial_net_list, axis=0)
+        ann = adata.obs[annotation].values
+        for ct in pd.unique(ann[~pd.isnull(ann)]):
+            idx = np.where(ann == ct)[0]
+            coor_g = coor[idx, :]
+            k = min(n_neighbors, coor_g.shape[0])
+            df = _find_neighbors(coor_g, k)
+            df["Cell1"] = idx[df["Cell1"].to_numpy()]
+            df["Cell2"] = idx[df["Cell2"].to_numpy()]
+            parts.append(df)
+            logger.info(f"{ct}: {coor_g.shape[0]} cells")
+
+        if pd.isnull(ann).any():
+            idx_nan = np.where(pd.isnull(ann))[0]
+            logger.info(f"NaN: {len(idx_nan)} cells")
+            df_all = _find_neighbors(coor, n_neighbors)
+            parts.append(df_all[df_all["Cell1"].isin(idx_nan)])
+
+        df_all = pd.concat(parts, axis=0, ignore_index=True)
     else:
         logger.info("Cell annotations are not provided...")
-        spatial_net = find_neighbors(coor, num_neighbour)
+        df_all = _find_neighbors(coor, n_neighbors)
 
-    return spatial_net.groupby("Cell1")["Cell2"].apply(np.array).to_dict()
-
-
-def find_neighbors_regional(cell_pos, spatial_net_dict, coor_latent, config, cell_annotations):
-    num_neighbour = config.num_neighbour
-    annotations = config.annotation
-
-    cell_use_pos = spatial_net_dict.get(cell_pos, [])
-    if len(cell_use_pos) == 0:
-        return []
-
-    cell_latent = coor_latent[cell_pos, :].reshape(1, -1)
-    neighbors_latent = coor_latent[cell_use_pos, :]
-    similarity = cosine_similarity(cell_latent, neighbors_latent).reshape(-1)
-
-    if annotations is not None:
-        cell_annotation = cell_annotations[cell_pos]
-        neighbor_annotations = cell_annotations[cell_use_pos]
-        mask = neighbor_annotations == cell_annotation
-        if not np.any(mask):
-            return []
-        similarity = similarity[mask]
-        cell_use_pos = cell_use_pos[mask]
-
-    if len(similarity) == 0:
-        return []
-
-    indices = np.argsort(-similarity)  # descending order
-    top_indices = indices[:num_neighbour]
-    cell_select_pos = cell_use_pos[top_indices]
-    return cell_select_pos
+    return df_all.groupby("Cell1")["Cell2"].apply(lambda s: s.to_numpy()).to_dict()
 
 
-def compute_regional_rank_list(
-    cell_pos,
-    spatial_net_dict,
-    coor_latent,
-    config,
-    cell_annotations,
-    ranks,
-):
-    """
-    Compute gmean ranks of a region.
-    """
-    cell_select_pos = find_neighbors_regional(
-        cell_pos, spatial_net_dict, coor_latent, config, cell_annotations
-    )
-    if len(cell_select_pos) == 0:
-        return np.zeros(ranks.shape[1], dtype=np.float16)
+def _regional_topk(
+    cell_pos: int,
+    spatial_net: dict[int, np.ndarray],
+    latent: np.ndarray,
+    top_k: int,
+    cell_annotations: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Select top_k neighbors by cosine similarity within spatial neighbors."""
+    nbrs = spatial_net.get(cell_pos, np.array([], dtype=int))
+    if nbrs.size == 0:
+        return nbrs
 
-    # Ratio of expression ranks
-    ranks_tg = ranks[cell_select_pos, :]
+    q = latent[cell_pos].reshape(1, -1)
+    K = latent[nbrs]
+    sim = cosine_similarity(q, K).ravel()
 
-    return ranks_tg
+    if cell_annotations is not None:
+        same = (cell_annotations[nbrs] == cell_annotations[cell_pos])
+        if not np.any(same):
+            return np.array([], dtype=int)
+        nbrs = nbrs[same]
+        sim = sim[same]
+
+    if sim.size == 0:
+        return np.array([], dtype=int)
+
+    k = min(top_k, sim.size)
+    top_idx = np.argpartition(-sim, k - 1)[:k]
+    return nbrs[top_idx]
 
 
-def run_latent_to_gene(config: LatentToGeneConfig):
-    logger.info("------Loading the spatial data...")
-    adata = sc.read_h5ad(config.hdf5_with_latent_path)
-    logger.info(f"Loaded spatial data with {adata.n_obs} cells and {adata.n_vars} genes.")
+def _maybe_homolog_transform(adata, config: LatentToGeneConfig) -> sc.AnnData:
+    """Convert species gene names to human symbols if configured."""
+    if config.homolog_file is None or config.species is None:
+        return adata
 
-    if config.annotation is not None:
-        logger.info(f"------Cell annotations are provided as {config.annotation}...")
-        initial_cell_count = adata.n_obs
-        adata = adata[~pd.isnull(adata.obs[config.annotation]), :]
-        logger.info(
-            f"Removed null annotations. Cells retained: {adata.n_obs} (initial: {initial_cell_count})."
+    species_col = f"{config.species}_homolog"
+    if species_col in adata.var.columns:
+        logger.warning(
+            f"Column '{species_col}' already exists; homolog conversion already done. Skipping."
         )
+        return adata
 
-    # Homologs transformation
-    if config.homolog_file is not None and config.species is not None:
-        species_col_name = f"{config.species}_homolog"
+    logger.info(f"------Transforming {config.species} genes to HUMAN_GENE_SYM...")
+    homologs = pd.read_csv(config.homolog_file, sep="\t", header=0)
+    if homologs.shape[1] != 2:
+        raise ValueError("Homolog file must have exactly two columns: <species> and HUMAN_GENE_SYM.")
 
-        # Check if homolog conversion has already been performed
-        if species_col_name in adata.var.columns:
-            logger.warning(
-                f"Column '{species_col_name}' already exists in adata.var. "
-                f"It appears gene names have already been converted to human gene symbols. "
-                f"Skipping homolog transformation."
-            )
-        else:
-            logger.info(f"------Transforming the {config.species} to HUMAN_GENE_SYM...")
-            homologs = pd.read_csv(config.homolog_file, sep="\t")
-            if homologs.shape[1] != 2:
-                raise ValueError(
-                    "Homologs file must have two columns: one for the species and one for the human gene symbol."
-                )
+    homologs.columns = [config.species, "HUMAN_GENE_SYM"]
+    homologs.set_index(config.species, inplace=True)
 
-            homologs.columns = [config.species, "HUMAN_GENE_SYM"]
-            homologs.set_index(config.species, inplace=True)
+    keep = adata.var_names.isin(homologs.index)
+    adata = adata[:, keep].copy()
+    logger.info(f"{adata.n_vars} genes retained after homolog filtering.")
+    if adata.n_vars < 100:
+        raise ValueError("Too few genes retained in ST data (<100).")
 
-            # original_gene_names = adata.var_names.copy()
+    adata.var[species_col] = adata.var_names.values
 
-            # Filter genes present in homolog file
-            adata = adata[:, adata.var_names.isin(homologs.index)]
-            logger.info(f"{adata.shape[1]} genes retained after homolog transformation.")
-            if adata.shape[1] < 100:
-                raise ValueError("Too few genes retained in ST data (<100).")
+    new_names = homologs.loc[adata.var_names, "HUMAN_GENE_SYM"].values
+    adata.var_names = new_names
+    adata.var.index.name = "HUMAN_GENE_SYM"
+    adata = adata[:, ~adata.var_names.duplicated()].copy()
+    logger.info(f"{adata.n_vars} genes retained after removing duplicates.")
+    return adata
 
-            # Create mapping table of original to human gene names
-            gene_mapping = pd.Series(
-                homologs.loc[adata.var_names, "HUMAN_GENE_SYM"].values, index=adata.var_names
-            )
 
-            # Store original species gene names in var dataframe with the suffixed column name
-            adata.var[species_col_name] = adata.var_names.values
+def get_rank(
+    config: LatentToGeneConfig,
+    *,
+    store_layer: str = "regional_rank",
+    agg: Literal["mean", "gmean"] = "mean",
+    save: bool = True,
+) -> Tuple[sc.AnnData, np.ndarray]:
+    """
+    Compute regional rank vector for each cell.
+    """
+    path = Path(config.hdf5_with_latent_path)
+    adata = sc.read_h5ad(str(path))
 
-            # Convert var_names to human gene symbols
-            adata.var_names = gene_mapping.values
-            adata.var.index.name = "HUMAN_GENE_SYM"
-
-            # Remove duplicated genes after conversion
-            adata = adata[:, ~adata.var_names.duplicated()]
-            logger.info(f"{adata.shape[1]} genes retained after removing duplicates.")
-
+    cell_annotations = None
     if config.annotation is not None:
+        logger.info(f"------Cell annotations provided: '{config.annotation}'")
+        ann = adata.obs[config.annotation]
+        initial = adata.n_obs
+        mask = ~pd.isnull(ann)
+        if not mask.all():
+            adata = adata[mask, :].copy()
+            logger.info(f"Removed null annotations: kept {adata.n_obs}/{initial} cells.")
         cell_annotations = adata.obs[config.annotation].values
-        logger.info(f"Using cell annotations for {len(cell_annotations)} cells.")
-    else:
-        cell_annotations = None
 
-    # Build the spatial graph
-    logger.info("------Building the spatial graph...")
-    spatial_net_dict = build_spatial_net(adata, config.annotation, config.num_neighbour_spatial)
-    logger.info("Spatial graph built successfully.")
+    adata = _maybe_homolog_transform(adata, config)
 
-    # Extract the latent representation
-    logger.info("------Extracting the latent representation...")
-    coor_latent = adata.obsm[config.latent_representation]
-    coor_latent = coor_latent.astype(np.float32)
-    logger.info("Latent representation extracted.")
+    spatial_net = _build_spatial_net(adata, config.annotation, config.num_neighbour_spatial)
 
-    # Compute ranks
+    latent_key = config.latent_representation
+    if latent_key not in adata.obsm:
+        raise KeyError(f"latent_representation '{latent_key}' not found in adata.obsm.")
+    latent = np.asarray(adata.obsm[latent_key], dtype=np.float32)
+
     logger.info("------Ranking the spatial data...")
-    if not scipy.sparse.issparse(adata.X):
-        adata_X = scipy.sparse.csr_matrix(adata.X)
-    elif isinstance(adata.X, scipy.sparse.csr_matrix):
-        adata_X = adata.X  # Avoid copying if already CSR
-    else:
-        adata_X = adata.X.tocsr()
+    X = adata.layers["pearson_residuals"] if "pearson_residuals" in adata.layers else adata.X
+    n_cells, n_genes = adata.n_obs, adata.n_vars
+    ranks = np.zeros((n_cells, n_genes), dtype=np.float32)
 
-    # Create mappings
-    n_cells = adata.n_obs
-    n_genes = adata.n_vars
-    pearson_residuals = True if "pearson_residuals" in adata.layers else False
-    ranks = np.zeros((n_cells, adata.n_vars), dtype=np.float16)
-
-    if pearson_residuals:
-        logger.info("Using pearson residuals for ranking.")
-        data = adata.layers["pearson_residuals"]
+    if sp.issparse(X):
+        X = X.tocsr()
         for i in tqdm(range(n_cells), desc="Computing ranks per cell"):
-            ranks[i, :] = rankdata(data[i, :], method="average")
+            row = X[i].toarray().ravel()
+            ranks[i, :] = rankdata(row, method="average")
     else:
+        X = np.asarray(X)
         for i in tqdm(range(n_cells), desc="Computing ranks per cell"):
-            data = adata_X[i, :].toarray().flatten()
-            ranks[i, :] = rankdata(data, method="average")
+            ranks[i, :] = rankdata(X[i, :], method="average")
 
-    def compute_rank_wrapper(cell_pos):
-        return compute_regional_rank_list(
-            cell_pos,
-            spatial_net_dict,
-            coor_latent,
-            config,
-            cell_annotations,
-            ranks,
-        )
-    gene_ranks_region_list = []
-    for i in trange(n_cells, desc="Computing regional ranks for each cell"):  
-        gene_ranks_region_list.append(compute_rank_wrapper(i))
+    logger.info("------Computing regional rank vectors...")
+    top_k = int(config.num_neighbour)
+    regional_rank = np.zeros((n_cells, n_genes), dtype=np.float32)
+    for i in trange(n_cells, desc="Computing regional ranks for each cell"):
+        sel = _regional_topk(i, spatial_net, latent, top_k, cell_annotations)
+        if sel.size == 0:
+            continue
+        if agg == "gmean":
+            region = ranks[sel, :]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                vec = np.exp(np.nanmean(np.log(np.maximum(region, 1.0)), axis=0))
+            regional_rank[i, :] = vec.astype(np.float32)
+        else:
+            regional_rank[i, :] = ranks[sel, :].mean(axis=0, dtype=np.float32)
 
-    logger.info("Ranking completed.")
+    adata.layers[store_layer] = regional_rank
+    logger.info(f"Regional rank matrix stored in adata.layers['{store_layer}'] with shape {regional_rank.shape}.")
 
-    # Save the modified adata object to disk
-    adata.write(config.hdf5_with_latent_path)
-    logger.info(f"Modified adata object saved to {config.hdf5_with_latent_path}.")
+    if save:
+        adata.write(str(path))
+        logger.info(f"Modified AnnData saved to {path}")
+
+    return adata, regional_rank
