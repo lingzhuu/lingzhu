@@ -132,7 +132,7 @@ def compute_regional_ranklist(
     """
     Compute a neighbor-aggregated rank list for one cell).
     Args:
-        cell_pos: index of the query cell (0-based).
+        cell_pos: index of the query cell.
         spatial_net_dict: Dict mapping from cell index to its spatial neighbor indices.
         coor_latent: latent embedding (e.g., adata.obsm["SEDR"]) used for cosine similarity.
         ranks: (n_cells, n_genes), per-cell per-gene ranks.
