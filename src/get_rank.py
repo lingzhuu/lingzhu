@@ -126,8 +126,8 @@ def compute_regional_ranklist(
     config,
     cell_annotations,
     ranks,
-    frac_whole,
-    adata_X_bool,
+    # frac_whole,
+    # adata_X_bool,
 ):
     """
     Compute a neighbor-aggregated rank list for one cell).
