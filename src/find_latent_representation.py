@@ -213,7 +213,7 @@ def run_find_latent_representation(args: FindLatentRepresentationsConfig):
 
     if "count" not in adata.layers:
         if _is_integer_like(adata.X):
-            logger.warning("No 'count' layer found; detected that adata.X is approximately integer and non-negative, backing it up to layers['count'].")
+            logger.warning("No 'counts' layer found; adata.X appears to contain raw counts and has been copied to adata.layers['counts'].")
             adata.layers["count"] = adata.X.copy()
         else:
             raise ValueError("The data layer should be raw count data.")
