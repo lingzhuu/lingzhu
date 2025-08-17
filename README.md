@@ -20,3 +20,5 @@ output: figure(optional), h5ad w/ latent infomation & clustering info
 
 ### Get gene rank list
 **get_rank.py**
+input: h5ad w/ latent infomation & clustering info
+output: rank matrix (n_cells x n_genes)
