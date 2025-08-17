@@ -126,8 +126,8 @@ def compute_regional_ranklist(
     config,
     cell_annotations,
     ranks,
-    # frac_whole,
-    # adata_X_bool,
+    frac_whole,
+    adata_X_bool,
 ):
     """
     Compute a neighbor-aggregated rank list for one cell).
@@ -152,15 +152,16 @@ def compute_regional_ranklist(
     agg = gmean(ranks_tg, axis=0)                           # (n_genes,)
 
 
-    # if not config.no_expression_fraction:
-    #     # Ratio of expression fractions
-    #     frac_focal = adata_X_bool[cell_select_pos, :].sum(axis=0).A1 / len(cell_select_pos)
-    #     frac_region = frac_focal / frac_whole
-    #     frac_region[frac_region <= 1] = 0
-    #     frac_region[frac_region > 1] = 1
+    if not config.no_expression_fraction:
+        # Ratio of expression fractions
+        frac_focal = adata_X_bool[cell_select_pos, :].sum(axis=0).A1 / len(cell_select_pos)
+        frac_region = frac_focal / frac_whole
+        # frac_region[frac_region <= 1] = 0
+        # frac_region[frac_region > 1] = 1
 
-    #     # Simultaneously consider the ratio of expression fractions and ranks
-    #     gene_ranks_region = gene_ranks_region * frac_region
+        # Mask genes that are not enriched (frac_region ≤ 1)
+        mask = frac_region <= 1
+        agg[mask] = np.inf
 
     rank_list = rankdata(agg, method="average").astype(np.float32, copy=False)
     return rank_list
