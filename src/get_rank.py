@@ -163,7 +163,7 @@ def compute_regional_ranklist(
         mask = frac_region <= 1
         agg[mask] = np.inf
 
-    rank_list = rankdata(agg, method="average").astype(np.float32, copy=False)
+    rank_list = rankdata(-agg, method="average").astype(np.float32, copy=False)
     return rank_list
 
 
