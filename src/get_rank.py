@@ -145,7 +145,7 @@ def compute_regional_ranklist(
     )
     if len(cell_select_pos) == 0:
         # Fallback: return this cell's own rank vector as a valid rank list
-        return rankdata(ranks[cell_pos, :], method="average").astype(np.float32, copy=False)
+        return rankdata(-ranks[cell_pos, :], method="average").astype(np.float32, copy=False)
 
 
     ranks_tg = ranks[cell_select_pos, :]                    # (k, n_genes)
@@ -161,9 +161,9 @@ def compute_regional_ranklist(
 
         # Mask genes that are not enriched (frac_region ≤ 1)
         mask = frac_region <= 1
-        agg[mask] = np.inf
+        agg[mask] = 0
 
-    rank_list = rankdata(-agg, method="average").astype(np.float32, copy=False)
+    rank_list = rankdata(agg, method="average").astype(np.float32, copy=False)
     return rank_list
 
 
