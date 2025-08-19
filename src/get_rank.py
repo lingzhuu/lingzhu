@@ -338,7 +338,9 @@ def run_latent_to_gene(config: LatentToGeneConfig):
 
     gene_names = adata.var_names.values.astype(str)
     out_df = pd.DataFrame(rank_list_mat, columns=gene_names, index=adata.obs_names)
-    out_df.to_feather(output_file_path)
+    out_df -= 1 
+    out_df_int = out_df.astype(int)
+    out_df_int.to_feather(output_file_path)
     logger.info(f"Regional rank lists saved to {output_file_path}.")
 
     # Save the modified adata object to disk
