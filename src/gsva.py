@@ -1,54 +1,17 @@
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Literal
 import os
 
 import numpy as np
 import pandas as pd
-import scanpy as sc
-import scipy
-from tqdm import tqdm, trange
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+import genesets
 
 from gsMap.config import LatentToGeneConfigdef 
 
 logger = logging.getLogger(__name__)
-
-def extract_gene_set(rank_list_mat, cluster_information):
-    """
-    Extract gene sets (sub-dataframes) for each cluster from a full gene-by-spot matrix.
-
-    Parameters
-    ----------
-    rank_list_mat: 
-        A dataframe where rows are spot/cell names and columns are gene names.
-        Typically this contains gene expression, ranks, or GSVA scores.
-    
-    cluster_information:
-        A Series where the index matches rank list matrix (spot/cell names), and the values are cluster labels (e.g., from adata.obs['leiden']).
-        Each unique label will be used to subset.
-
-    Returns
-    -------
-    split_rank_list_mats:
-        A dictionary where each key is a cluster label (as string), and the value is a df containing rows of that cluster only.
-    """
-    # Ensure input indices are aligned
-    if not rank_list_mat.index.isin(cluster_information.index).all():
-        raise ValueError("The indices of rank list must in cluster indices.")
-
-    # Convert cluster labels to strings (for consistent dictionary keys)
-    cluster_series = cluster_information.astype(str)
-
-    # Dictionary to hold subsets
-    split_rank_list_mats = {}
-
-    for cluster in np.unique(cluster_series):
-        spots_in_cluster = cluster_series[cluster_series == cluster].index
-        sub_df = rank_list_mat.loc[spots_in_cluster].copy()
-        split_rank_list_mats[cluster] = sub_df
-
-    return split_rank_list_mats
-
     
 
 def gene_set_variation_analysis(config: GeneSetVariantConfig):
@@ -112,3 +75,27 @@ def gene_set_variation_analysis(config: GeneSetVariantConfig):
     logger.info("GSVA completed successfully.")
     
     return gsva_df
+
+
+def plot_heatmap(gsva_df, output_file_path):
+    """
+    Plot a heatmap of GSVA scores.
+
+    Parameters:
+    -----------
+    gsva_df: 
+        DataFrame containing GSVA scores.
+    
+    output_file_path: 
+        Optional path to save the heatmap image.
+    """
+
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(gsva_df, cmap='viridis', annot=False)
+    
+    if output_file_path:
+        plt.savefig(output_file_path)
+        logger.info(f"Heatmap saved to {output_file_path}")
+    
+    plt.show()
